@@ -149,6 +149,8 @@
       <span id="gpsBannerText" class="text-[11.5px] text-red-200 leading-snug"></span>
       <button id="gpsRetryBtn" class="shrink-0 px-2.5 py-1.5 rounded-md bg-red-500/30 text-white text-[11px] font-bold">다시 시도</button>
     </div>
+    <!-- temporary debug readout for diagnosing pinch-zoom; safe to remove later -->
+    <div id="debugLine" class="absolute bottom-2 left-1/2 -translate-x-1/2 z-[470] glass rounded-full px-3 py-1 text-[10px] text-amber-300 font-mono pointer-events-none" style="white-space:nowrap;">pointers: 0</div>
   </main>
 
   <!-- ===== CONTROL BAR ===== -->
@@ -531,10 +533,14 @@
     };
   }
 
+  var debugLine = document.getElementById("debugLine");
+  function setDebug(msg) { if (debugLine) debugLine.textContent = msg; }
+
   function onGesturePointerDown(e) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     mapContainer.setPointerCapture(e.pointerId);
     activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    setDebug("pointers:" + activePointers.size + " type:" + e.pointerType + " down");
     if (activePointers.size === 1) {
       gestureMoved = 0;
       singleDragLast = { x: e.clientX, y: e.clientY };
@@ -549,6 +555,7 @@
     if (!activePointers.has(e.pointerId)) return;
     activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     var pts = Array.from(activePointers.values());
+    setDebug("pointers:" + pts.length + " type:" + e.pointerType + " move");
 
     if (pts.length === 1 && singleDragLast) {
       var dx = e.clientX - singleDragLast.x;
@@ -567,6 +574,7 @@
       var mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
       if (lastPinchDist) {
         var factor = dist / lastPinchDist;
+        setDebug("pinch dist:" + Math.round(dist) + " factor:" + factor.toFixed(3) + " zoom:" + map.getZoom().toFixed(2));
         if (isFinite(factor) && Math.abs(factor - 1) > 0.002) {
           var midCp = screenToContainerPoint(mid.x, mid.y);
           var newZoom = map.getZoom() + Math.log2(factor);
@@ -580,6 +588,7 @@
 
   function onGesturePointerUp(e) {
     activePointers.delete(e.pointerId);
+    setDebug("pointers:" + activePointers.size + " up");
     if (activePointers.size < 2) lastPinchDist = null;
     if (activePointers.size === 1) {
       var remaining = Array.from(activePointers.values())[0];
