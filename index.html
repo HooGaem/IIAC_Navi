@@ -149,8 +149,6 @@
       <span id="gpsBannerText" class="text-[11.5px] text-red-200 leading-snug"></span>
       <button id="gpsRetryBtn" class="shrink-0 px-2.5 py-1.5 rounded-md bg-red-500/30 text-white text-[11px] font-bold">다시 시도</button>
     </div>
-    <!-- temporary debug readout for diagnosing pinch-zoom; safe to remove later -->
-    <div id="debugLine" class="absolute bottom-2 left-1/2 -translate-x-1/2 z-[470] glass rounded-full px-3 py-1 text-[10px] text-amber-300 font-mono pointer-events-none" style="white-space:nowrap;">pointers: 0</div>
   </main>
 
   <!-- ===== CONTROL BAR ===== -->
@@ -211,6 +209,7 @@
   var lastAccuracy = null;
 
   var lastAcceptedFix = null; // {lat, lon, t}
+  var restAnchor = null;      // [lat, lon] resting point used to absorb GPS noise while stationary
   var animFrom = null, animTo = null, animStart = 0, animDur = 800;
   var animatedPos = CENTER.slice();
 
@@ -393,8 +392,27 @@
       displaySpeedKmh = rawSpeedMs != null ? Math.max(0, rawSpeedMs * 3.6) : 0;
     }
 
+    // GPS-at-rest noise gate: even a stationary receiver reports a few meters of
+    // wobble on every fix. Only move the displayed marker once that wobble exceeds
+    // a radius scaled to the fix's own accuracy; otherwise keep it pinned to the
+    // last real resting point so it stops trembling while you're not moving.
+    var targetLat = lat, targetLon = lon;
+    if (!restAnchor) {
+      restAnchor = [lat, lon];
+    } else {
+      var distFromAnchor = haversine(restAnchor[0], restAnchor[1], lat, lon);
+      var noiseRadius = Math.max(4, (acc || 10) * 0.7);
+      if (distFromAnchor < noiseRadius) {
+        targetLat = restAnchor[0];
+        targetLon = restAnchor[1];
+        displaySpeedKmh = 0;
+      } else {
+        restAnchor = [lat, lon];
+      }
+    }
+
     animFrom = animatedPos.slice();
-    animTo = [lat, lon];
+    animTo = [targetLat, targetLon];
     animStart = now;
     var interval = lastAcceptedFix ? (now - lastAcceptedFix.tPerf) : 800;
     animDur = Math.min(Math.max(interval, 300), 2000);
@@ -533,14 +551,10 @@
     };
   }
 
-  var debugLine = document.getElementById("debugLine");
-  function setDebug(msg) { if (debugLine) debugLine.textContent = msg; }
-
   function onGesturePointerDown(e) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     mapContainer.setPointerCapture(e.pointerId);
     activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    setDebug("pointers:" + activePointers.size + " type:" + e.pointerType + " down");
     if (activePointers.size === 1) {
       gestureMoved = 0;
       singleDragLast = { x: e.clientX, y: e.clientY };
@@ -555,7 +569,6 @@
     if (!activePointers.has(e.pointerId)) return;
     activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     var pts = Array.from(activePointers.values());
-    setDebug("pointers:" + pts.length + " type:" + e.pointerType + " move");
 
     if (pts.length === 1 && singleDragLast) {
       var dx = e.clientX - singleDragLast.x;
@@ -574,7 +587,6 @@
       var mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
       if (lastPinchDist) {
         var factor = dist / lastPinchDist;
-        setDebug("pinch dist:" + Math.round(dist) + " factor:" + factor.toFixed(3) + " zoom:" + map.getZoom().toFixed(2));
         if (isFinite(factor) && Math.abs(factor - 1) > 0.002) {
           var midCp = screenToContainerPoint(mid.x, mid.y);
           var newZoom = map.getZoom() + Math.log2(factor);
@@ -588,7 +600,6 @@
 
   function onGesturePointerUp(e) {
     activePointers.delete(e.pointerId);
-    setDebug("pointers:" + activePointers.size + " up");
     if (activePointers.size < 2) lastPinchDist = null;
     if (activePointers.size === 1) {
       var remaining = Array.from(activePointers.values())[0];
