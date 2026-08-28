@@ -196,7 +196,7 @@
      STATE
   ============================================================ */
   var CENTER = [37.4485, 126.4512];
-  var STORAGE_KEY = "iiac.drivenav.pins.v1";
+  var STORAGE_KEY = "iiac.drivenav.pins.v2"; // bumped to drop the old sample pins from saved devices
 
   var mode = "nav";           // 'nav' (heading-up) | 'north' (north-up)
   var follow = true;
@@ -632,13 +632,7 @@
   /* ============================================================
      PINS: seed data + storage + rendering
   ============================================================ */
-  var SEED_PINS = [
-    { name: "샘플 · T1 여객터미널 진입로", lat: 37.4488, lon: 126.4519 },
-    { name: "샘플 · T2 화물계류장", lat: 37.4560, lon: 126.4390 },
-    { name: "샘플 · 남측 유도로 진입점", lat: 37.4420, lon: 126.4470 },
-    { name: "샘플 · 정비단지", lat: 37.4530, lon: 126.4600 },
-    { name: "샘플 · 제1주차타워", lat: 37.4470, lon: 126.4530 }
-  ];
+  var SEED_PINS = [];
 
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
