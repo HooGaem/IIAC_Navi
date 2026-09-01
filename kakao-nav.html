@@ -148,6 +148,10 @@
       <span id="gpsBannerText" class="text-[11.5px] text-red-200 leading-snug"></span>
       <button id="gpsRetryBtn" class="shrink-0 px-2.5 py-1.5 rounded-md bg-red-500/30 text-white text-[11px] font-bold">다시 시도</button>
     </div>
+    <div id="sdkErrorBanner" class="hidden absolute inset-x-3 top-1/2 -translate-y-1/2 z-[470] glass rounded-xl p-4 text-center" style="border-color: rgba(255,107,107,0.5);">
+      <div class="text-sm font-bold text-red-300 mb-1.5">카카오맵을 불러오지 못했습니다</div>
+      <div id="sdkErrorText" class="text-[12px] text-slate-300 leading-relaxed"></div>
+    </div>
   </main>
 
   <!-- ===== CONTROL BAR ===== -->
@@ -287,7 +291,27 @@ async function sha256Hex(str) {
 
 // Kakao's SDK is loaded with autoload=false, so kakao.maps.* isn't populated
 // until this callback fires — everything that touches the map lives inside it.
-kakao.maps.load(function () {
+// If the SDK script failed to load (network block, bad key) or its load
+// callback never fires — e.g. this site's domain isn't registered in Kakao
+// Developers → 플랫폼 → Web, which Kakao surfaces as its own alert() rather
+// than a promise rejection we could catch — the map area would otherwise just
+// stay silently blank. Surface that on screen instead of leaving it a mystery.
+function showSdkError(msg) {
+  document.getElementById("sdkErrorText").textContent = msg;
+  document.getElementById("sdkErrorBanner").classList.remove("hidden");
+}
+
+if (typeof kakao === "undefined" || !kakao.maps) {
+  showSdkError("카카오맵 스크립트 자체가 로드되지 않았습니다. 네트워크 상태를 확인하거나, 카카오 디벨로퍼스 → 내 애플리케이션 → 플랫폼에 이 사이트 도메인이 등록되어 있는지 확인해 주세요.");
+} else {
+  var kakaoLoaded = false;
+  setTimeout(function () {
+    if (!kakaoLoaded) {
+      showSdkError("5초 안에 지도가 초기화되지 않았습니다. 카카오 디벨로퍼스 → 내 애플리케이션 → 플랫폼(Web)에 이 사이트 주소(https://hoogaem.github.io)가 정확히 등록되어 있는지 확인해 주세요.");
+    }
+  }, 5000);
+  kakao.maps.load(function () {
+  kakaoLoaded = true;
   "use strict";
 
   /* ============================================================
@@ -941,7 +965,8 @@ kakao.maps.load(function () {
   window.addEventListener("resize", function () { map.relayout(); });
   setTimeout(function () { map.relayout(); }, 200);
 
-});
+  });
+}
 </script>
 </body>
 </html>
