@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>IIAC 드라이브 내비게이터 (카카오맵)</title>
+
+<script src="//dapi.kakao.com/v2/maps/sdk.js?appkey=7ab262792dae44aa7df67bf94bc92440&autoload=false"></script>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = { darkMode: 'class' };
+</script>
+
+<style>
+  html, body { height: 100%; margin: 0; overscroll-behavior: none; }
+  body { font-family: -apple-system, "Malgun Gothic", sans-serif; }
+  #app { position: fixed; inset: 0; display: flex; flex-direction: column; background: #0d1117; }
+
+  /* ---- map viewport / rotation rig ---- */
+  #mapViewport {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    background: #1a1f27;
+    touch-action: none;
+  }
+  #mapWrapper {
+    position: absolute;
+    top: -25%;
+    left: -25%;
+    width: 150%;
+    height: 150%;
+    transform-origin: center center;
+    transition: transform 0.15s linear;
+    will-change: transform;
+  }
+  #map { width: 100%; height: 100%; background: #1a1f27; touch-action: none; }
+
+  /* dark mode: invert the whole map container (tiles + overlays alike, whatever
+     Kakao renders them as internally), then counter-invert our own overlay content
+     so pin/vehicle colors stay correct instead of also flipping. */
+  #map.dark-map { filter: invert(100%) hue-rotate(180deg) brightness(0.92) contrast(0.9) saturate(0.9); }
+  #map.dark-map .counter-invert { filter: invert(100%) hue-rotate(180deg); }
+
+  /* ---- vehicle marker ---- */
+  .veh-icon { width: 68px; height: 68px; overflow: visible; pointer-events: none; display: block; }
+
+  /* ---- pin label (always readable) ---- */
+  .pin-box { position: relative; width: 16px; height: 16px; }
+  .pin-anchor { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); }
+  .pin-wrap { pointer-events: auto; display: flex; flex-direction: column; align-items: center; transform-origin: center bottom; cursor: pointer; }
+  .pin-label {
+    background: #000;
+    border: 1.5px solid #ffcc33;
+    color: #fff;
+    font-weight: 700;
+    font-size: 11px;
+    line-height: 1.3;
+    padding: 3px 7px;
+    border-radius: 6px;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+    margin-bottom: 3px;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pin-dot { width: 10px; height: 10px; border-radius: 50%; background: #ffcc33; border: 2px solid #000; }
+
+  /* ---- glass HUD ---- */
+  .glass {
+    background: rgba(13, 17, 23, 0.72);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .metric-num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .btn-toggle {
+    transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+  }
+  .btn-toggle.active { background: #ffc53d; color: #1a1200; border-color: #ffc53d; }
+
+  #followBtn { transition: opacity .2s ease, transform .2s ease; }
+  #followBtn.hidden-btn { opacity: 0; transform: scale(0.8) translateY(6px); pointer-events: none; }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #3a4453; border-radius: 3px; }
+</style>
+</head>
+<body class="dark">
+<div id="app">
+
+  <!-- ===== HUD ===== -->
+  <header class="glass text-white shrink-0 z-[500] px-3 py-2 flex items-center gap-2" style="padding-top: max(8px, env(safe-area-inset-top));">
+    <div class="flex flex-col leading-tight mr-1 shrink-0">
+      <span class="font-black text-[13px] tracking-wide text-amber-400">IIAC NAV</span>
+      <span class="text-[9px] text-slate-400 uppercase tracking-wider">드라이브 모드 · 카카오맵</span>
+    </div>
+
+    <div class="flex-1 grid grid-cols-3 gap-1.5 min-w-0">
+      <div class="rounded-lg bg-white/5 px-2 py-1 flex flex-col items-center">
+        <span class="text-[9px] text-slate-400 uppercase tracking-wide">속도</span>
+        <span id="hudSpeed" class="metric-num text-lg font-bold text-amber-300 leading-none">0<span class="text-[10px] text-slate-400 font-normal ml-0.5">km/h</span></span>
+      </div>
+      <div class="rounded-lg bg-white/5 px-2 py-1 flex flex-col items-center">
+        <span class="text-[9px] text-slate-400 uppercase tracking-wide">방위각</span>
+        <span id="hudHeading" class="metric-num text-lg font-bold text-cyan-300 leading-none">--<span class="text-[10px] text-slate-400 font-normal ml-0.5">°</span></span>
+      </div>
+      <div class="rounded-lg bg-white/5 px-2 py-1 flex flex-col items-center">
+        <span class="text-[9px] text-slate-400 uppercase tracking-wide">오차</span>
+        <span id="hudAcc" class="metric-num text-lg font-bold text-slate-200 leading-none">±--<span class="text-[10px] text-slate-400 font-normal ml-0.5">m</span></span>
+      </div>
+    </div>
+
+    <button id="gpsBadge" class="shrink-0 flex items-center gap-1.5 rounded-full bg-white/5 px-2.5 py-1.5 text-[11px] font-semibold text-slate-300">
+      <span id="gpsDot" class="status-dot bg-slate-500"></span>
+      <span id="gpsText">연결 중</span>
+    </button>
+  </header>
+
+  <!-- ===== MAP ===== -->
+  <main id="mapViewport">
+    <div id="mapWrapper"><div id="map"></div></div>
+
+    <!-- compass ring, fixed on screen (not rotated) -->
+    <div class="absolute top-2 right-2 z-[450] w-9 h-9 rounded-full glass flex items-center justify-center pointer-events-none">
+      <div id="compassRing" style="transition: transform .15s linear;">
+        <svg width="18" height="18" viewBox="0 0 18 18"><path d="M9 1 L11.2 8.5 L9 6.5 L6.8 8.5 Z" fill="#ffc53d"/><text x="9" y="16.5" font-size="6" font-weight="700" fill="#94a3b8" text-anchor="middle">N</text></svg>
+      </div>
+    </div>
+
+    <!-- follow / recenter button -->
+    <button id="followBtn" class="hidden-btn absolute right-2 z-[450] w-11 h-11 rounded-full glass text-cyan-300 text-lg font-bold shadow-lg" style="bottom: 96px;">◎</button>
+
+    <!-- zoom buttons -->
+    <div class="absolute left-2 z-[450] flex flex-col gap-1.5" style="bottom: 96px;">
+      <button id="zoomInBtn" class="w-10 h-10 rounded-lg glass text-white text-lg font-bold">＋</button>
+      <button id="zoomOutBtn" class="w-10 h-10 rounded-lg glass text-white text-lg font-bold">－</button>
+    </div>
+
+    <div id="hint" class="absolute top-2 left-2 right-14 z-[450] glass text-[11px] text-slate-300 rounded-lg px-2.5 py-1.5 pointer-events-none">
+      지도를 길게 눌러 메모 핀 추가 · 핀을 길게 눌러 삭제
+    </div>
+    <div id="gpsBanner" class="hidden absolute top-2 left-2 right-14 z-[460] glass rounded-lg px-3 py-2 flex items-center justify-between gap-2" style="border-color: rgba(255,107,107,0.5);">
+      <span id="gpsBannerText" class="text-[11.5px] text-red-200 leading-snug"></span>
+      <button id="gpsRetryBtn" class="shrink-0 px-2.5 py-1.5 rounded-md bg-red-500/30 text-white text-[11px] font-bold">다시 시도</button>
+    </div>
+  </main>
+
+  <!-- ===== CONTROL BAR ===== -->
+  <footer class="glass shrink-0 z-[500] px-3 py-2.5 flex items-center gap-2 overflow-x-auto" style="padding-bottom: max(10px, env(safe-area-inset-bottom));">
+    <div class="flex rounded-lg overflow-hidden border border-white/10 shrink-0">
+      <button id="navModeBtn" class="btn-toggle active px-3 py-2 text-[12px] font-bold bg-white/5 text-slate-300 border-0">내비(Heading-Up)</button>
+      <button id="northModeBtn" class="btn-toggle px-3 py-2 text-[12px] font-bold bg-white/5 text-slate-300 border-0 border-l border-white/10">북쪽 고정</button>
+    </div>
+    <button id="wakeBtn" class="btn-toggle shrink-0 px-3 py-2 rounded-lg text-[12px] font-bold bg-white/5 text-slate-300 border border-white/10">화면 유지</button>
+    <button id="darkBtn" class="btn-toggle active shrink-0 px-3 py-2 rounded-lg text-[12px] font-bold bg-white/5 text-slate-300 border border-white/10">다크맵</button>
+    <button id="compassPermBtn" class="hidden shrink-0 px-3 py-2 rounded-lg text-[12px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">나침반 권한</button>
+  </footer>
+</div>
+
+<!-- ===== add-pin modal ===== -->
+<div id="pinModal" class="fixed inset-0 z-[900] hidden items-center justify-center bg-black/60 px-6">
+  <div class="glass rounded-2xl p-4 w-full max-w-xs text-white">
+    <div class="text-sm font-bold text-amber-300 mb-1">메모 핀 추가</div>
+    <div id="pinModalCoords" class="text-[11px] text-slate-400 mb-3 metric-num"></div>
+    <input id="pinNameInput" type="text" placeholder="예: 남측 진입 차단기" class="w-full rounded-lg bg-white/10 border border-white/10 px-3 py-2 text-sm outline-none focus:border-amber-400" />
+    <div class="flex gap-2 mt-3">
+      <button id="pinCancelBtn" class="flex-1 py-2 rounded-lg bg-white/10 text-slate-300 text-sm font-bold">취소</button>
+      <button id="pinSaveBtn" class="flex-1 py-2 rounded-lg bg-amber-400 text-[#1a1200] text-sm font-bold">저장</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== delete-pin modal ===== -->
+<div id="deleteModal" class="fixed inset-0 z-[900] hidden items-center justify-center bg-black/60 px-6">
+  <div class="glass rounded-2xl p-4 w-full max-w-xs text-white">
+    <div class="text-sm font-bold text-red-400 mb-1">메모 핀 삭제</div>
+    <div id="deleteModalName" class="text-[13px] text-slate-300 mb-3"></div>
+    <div class="flex gap-2">
+      <button id="deleteCancelBtn" class="flex-1 py-2 rounded-lg bg-white/10 text-slate-300 text-sm font-bold">취소</button>
+      <button id="deleteConfirmBtn" class="flex-1 py-2 rounded-lg bg-red-500 text-white text-sm font-bold">삭제</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== shared access gate ===== -->
+<div id="gateOverlay" class="fixed inset-0 z-[1000] flex items-center justify-center px-6" style="background:#0d1117;">
+  <div class="glass rounded-2xl p-5 w-full max-w-xs text-white">
+    <div class="text-base font-bold text-amber-300 mb-1" id="gateTitle">확인 중…</div>
+    <div class="text-[12px] text-slate-400 mb-3" id="gateSubtitle"></div>
+    <input id="gatePasswordInput" type="password" placeholder="공유 비밀번호" class="hidden w-full rounded-lg bg-white/10 border border-white/10 px-3 py-2 text-sm outline-none focus:border-amber-400" />
+    <div id="gateError" class="hidden text-[12px] text-red-400 mt-2">비밀번호가 올바르지 않습니다.</div>
+    <button id="gateSubmitBtn" class="hidden mt-3 w-full py-2 rounded-lg bg-amber-400 text-[#1a1200] text-sm font-bold">확인</button>
+  </div>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import {
+  getFirestore, collection, doc, getDoc, setDoc, addDoc, deleteDoc, onSnapshot, serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+// Same Firebase project as the OSM/Leaflet version, so both map engines share the
+// same pins and the same team password — swap this if the two should stay separate.
+var firebaseConfig = {
+  apiKey: "AIzaSyBVoRO7Tqc1AZVZpUht2piKNNTCGXjfyak",
+  authDomain: "iiac-navi-bcf69.firebaseapp.com",
+  projectId: "iiac-navi-bcf69",
+  storageBucket: "iiac-navi-bcf69.firebasestorage.app",
+  messagingSenderId: "476611551783",
+  appId: "1:476611551783:web:471ebd0365801a09036402"
+};
+var fbApp = initializeApp(firebaseConfig);
+var db = getFirestore(fbApp);
+var pinsCol = collection(db, "pins");
+var accessDocRef = doc(db, "meta", "access");
+
+async function sha256Hex(str) {
+  var buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+}
+
+// Soft access gate: hides the app behind a shared password backed by a hash in
+// Firestore. Firestore's own rules stay open, so this is a courtesy lock for a
+// trusted team, not real security.
+(function initGate() {
+  var GATE_REMEMBER_KEY = "iiac.drivenav.gateHash.v1";
+  var overlay = document.getElementById("gateOverlay");
+  var title = document.getElementById("gateTitle");
+  var subtitle = document.getElementById("gateSubtitle");
+  var input = document.getElementById("gatePasswordInput");
+  var errorEl = document.getElementById("gateError");
+  var submitBtn = document.getElementById("gateSubmitBtn");
+
+  function unlock(hash) {
+    try { localStorage.setItem(GATE_REMEMBER_KEY, hash); } catch (e) {}
+    overlay.style.display = "none";
+  }
+  function showError(msg) {
+    errorEl.textContent = msg;
+    errorEl.classList.remove("hidden");
+  }
+
+  getDoc(accessDocRef).then(function (snap) {
+    if (snap.exists()) {
+      var storedHash = snap.data().passwordHash;
+      var remembered = null;
+      try { remembered = localStorage.getItem(GATE_REMEMBER_KEY); } catch (e) {}
+      if (remembered && remembered === storedHash) { unlock(storedHash); return; }
+
+      title.textContent = "공유 비밀번호 입력";
+      subtitle.textContent = "팀에서 정한 비밀번호를 입력하세요.";
+      input.classList.remove("hidden");
+      submitBtn.classList.remove("hidden");
+      submitBtn.addEventListener("click", function () {
+        sha256Hex(input.value).then(function (hash) {
+          if (hash === storedHash) { errorEl.classList.add("hidden"); unlock(storedHash); }
+          else { showError("비밀번호가 올바르지 않습니다."); }
+        });
+      });
+    } else {
+      title.textContent = "공유 비밀번호 만들기";
+      subtitle.textContent = "처음 실행이에요. 팀과 함께 쓸 비밀번호를 정해주세요.";
+      input.classList.remove("hidden");
+      submitBtn.classList.remove("hidden");
+      submitBtn.textContent = "설정하고 시작";
+      submitBtn.addEventListener("click", function () {
+        var pw = input.value.trim();
+        if (pw.length < 4) { showError("4자 이상 입력해 주세요."); return; }
+        sha256Hex(pw).then(function (hash) {
+          setDoc(accessDocRef, { passwordHash: hash }).then(function () {
+            unlock(hash);
+          }).catch(function () { showError("저장 실패, 다시 시도해 주세요."); });
+        });
+      });
+    }
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") submitBtn.click(); });
+  }).catch(function () {
+    title.textContent = "연결 오류";
+    subtitle.textContent = "네트워크 상태를 확인하고 새로고침해 주세요.";
+  });
+})();
+
+// Kakao's SDK is loaded with autoload=false, so kakao.maps.* isn't populated
+// until this callback fires — everything that touches the map lives inside it.
+kakao.maps.load(function () {
+  "use strict";
+
+  /* ============================================================
+     STATE
+  ============================================================ */
+  var CENTER = { lat: 37.4485, lon: 126.4512 };
+  var START_LEVEL = 3; // Kakao "level": lower = more zoomed in (roughly street scale)
+
+  var mode = "nav";           // 'nav' (heading-up) | 'north' (north-up)
+  var follow = true;
+  var isDark = true;
+  var wakeLock = null;
+  var wakeOn = false;
+
+  var smoothedHeading = 0;    // degrees, 0 = north
+  var displaySpeedKmh = 0;
+  var lastAccuracy = null;
+
+  var lastAcceptedFix = null; // {lat, lon, tPerf, acc}
+  var restAnchor = null;      // [lat, lon] resting point used to absorb GPS noise while stationary
+  var animFrom = null, animTo = null, animStart = 0, animDur = 800;
+  var animatedPos = [CENTER.lat, CENTER.lon];
+
+  var compassHeading = null;
+  var compassAvailable = false;
+
+  var pins = [];
+  var pinOverlays = []; // { overlay, el, id }
+  var longPressTimer = null;
+  var longPressStart = null;
+
+  /* ============================================================
+     MAP SETUP
+  ============================================================ */
+  var mapEl = document.getElementById("map");
+  var map = new kakao.maps.Map(mapEl, {
+    center: new kakao.maps.LatLng(CENTER.lat, CENTER.lon),
+    level: START_LEVEL
+  });
+  map.setDraggable(false); // panning is fully custom (rotation-aware) — see below
+  map.setZoomable(false);  // likewise for pinch/wheel/double-click zoom
+  mapEl.classList.add("dark-map");
+
+  var accuracyCircle = new kakao.maps.Circle({
+    center: new kakao.maps.LatLng(CENTER.lat, CENTER.lon),
+    radius: 15,
+    strokeWeight: 1,
+    strokeColor: "#4fd1ff",
+    strokeOpacity: 0.8,
+    fillColor: "#4fd1ff",
+    fillOpacity: 0.12
+  });
+  accuracyCircle.setMap(map);
+
+  var vehicleIconHtml =
+    '<svg class="veh-icon" viewBox="0 0 68 68">' +
+      '<defs><radialGradient id="fovGrad" cx="50%" cy="100%" r="100%">' +
+        '<stop offset="0%" stop-color="#4fd1ff" stop-opacity="0.55"/>' +
+        '<stop offset="100%" stop-color="#4fd1ff" stop-opacity="0"/>' +
+      '</radialGradient></defs>' +
+      '<path class="fov" d="M34 34 L14 4 A34 34 0 0 1 54 4 Z" fill="url(#fovGrad)"/>' +
+      '<g class="arrow"><polygon points="34,16 44,42 34,35 24,42" fill="#4fd1ff" stroke="#0d1117" stroke-width="2" stroke-linejoin="round"/></g>' +
+    '</svg>';
+
+  var vehicleEl = document.createElement("div");
+  vehicleEl.className = "counter-invert";
+  vehicleEl.style.pointerEvents = "none";
+  vehicleEl.innerHTML = vehicleIconHtml;
+  var vehicleOverlay = new kakao.maps.CustomOverlay({
+    position: new kakao.maps.LatLng(CENTER.lat, CENTER.lon),
+    content: vehicleEl,
+    xAnchor: 0.5,
+    yAnchor: 0.5,
+    zIndex: 100
+  });
+  vehicleOverlay.setMap(map);
+
+  /* ============================================================
+     GEO MATH
+  ============================================================ */
+  function toRad(d) { return d * Math.PI / 180; }
+  function toDeg(r) { return r * 180 / Math.PI; }
+
+  function haversine(lat1, lon1, lat2, lon2) {
+    var R = 6371000;
+    var dLat = toRad(lat2 - lat1);
+    var dLon = toRad(lon2 - lon1);
+    var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+  function bearing(lat1, lon1, lat2, lon2) {
+    var y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+    var x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+            Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+    return (toDeg(Math.atan2(y, x)) + 360) % 360;
+  }
+  function shortestDelta(from, to) {
+    var d = ((to - from + 540) % 360) - 180;
+    return d;
+  }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  /* ============================================================
+     GPS: watchPosition + jitter filter + LERP animation
+  ============================================================ */
+  var gpsDot = document.getElementById("gpsDot");
+  var gpsText = document.getElementById("gpsText");
+  var gpsBanner = document.getElementById("gpsBanner");
+  var gpsBannerText = document.getElementById("gpsBannerText");
+  var hintEl = document.getElementById("hint");
+  var watchHandle = null;
+
+  function setGpsStatus(state, text) {
+    gpsText.textContent = text;
+    gpsDot.className = "status-dot " + (state === "ok" ? "bg-emerald-400" : state === "warn" ? "bg-red-400" : "bg-slate-500");
+  }
+  function showGpsBanner(msg) {
+    gpsBannerText.textContent = msg;
+    gpsBanner.classList.remove("hidden");
+    hintEl.classList.add("hidden");
+  }
+  function hideGpsBanner() {
+    gpsBanner.classList.add("hidden");
+    hintEl.classList.remove("hidden");
+  }
+
+  function startGeolocation() {
+    if (!window.isSecureContext) {
+      setGpsStatus("warn", "HTTPS 필요");
+      showGpsBanner("이 페이지가 보안 연결(HTTPS)이 아니어서 위치 정보를 가져올 수 없습니다. file://로 직접 연 경우 브라우저가 위치 기능을 차단합니다 — HTTPS로 호스팅된 주소에서 다시 열어주세요.");
+      return;
+    }
+    if (!("geolocation" in navigator)) {
+      setGpsStatus("warn", "GPS 미지원");
+      showGpsBanner("이 브라우저는 위치 정보 기능을 지원하지 않습니다.");
+      return;
+    }
+    setGpsStatus(null, "연결 중");
+    if (watchHandle != null) navigator.geolocation.clearWatch(watchHandle);
+    watchHandle = navigator.geolocation.watchPosition(onFix, onFixError, {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 3000
+    });
+  }
+  document.getElementById("gpsRetryBtn").addEventListener("click", startGeolocation);
+  startGeolocation();
+
+  function onFixError(err) {
+    if (err.code === err.PERMISSION_DENIED) {
+      setGpsStatus("warn", "권한 거부됨");
+      showGpsBanner("위치 권한이 거부되었습니다. 주소창의 자물쇠(사이트 정보) 아이콘 → 권한 → 위치를 '허용'으로 바꾼 뒤 새로고침하거나, 아래 버튼으로 다시 시도하세요.");
+    } else if (err.code === err.TIMEOUT) {
+      setGpsStatus("warn", "신호 없음");
+      showGpsBanner("위치 신호를 받는 데 시간이 오래 걸리고 있습니다. GPS/위치 서비스가 켜져 있는지 확인해 주세요.");
+    } else {
+      setGpsStatus("warn", "신호 없음");
+      showGpsBanner("위치를 확인할 수 없습니다. GPS/위치 서비스가 켜져 있는지 확인해 주세요.");
+    }
+  }
+
+  function onFix(pos) {
+    var now = performance.now();
+    var lat = pos.coords.latitude, lon = pos.coords.longitude;
+    var acc = pos.coords.accuracy;
+    lastAccuracy = acc;
+
+    var rawSpeedMs = pos.coords.speed;
+    var rawHeading = pos.coords.heading;
+
+    if (lastAcceptedFix) {
+      var dt = (now - lastAcceptedFix.tPerf) / 1000;
+      if (dt > 0.05) {
+        var dist = haversine(lastAcceptedFix.lat, lastAcceptedFix.lon, lat, lon);
+        var impliedSpeed = dist / dt;
+
+        if (impliedSpeed > 55 && acc > 15) {
+          setGpsStatus("warn", "신호 흔들림 보정 중");
+          return;
+        }
+        if (acc > 100 && (now - lastAcceptedFix.tPerf) < 5000 && lastAcceptedFix.acc < 30) {
+          return;
+        }
+
+        var speedKmh = rawSpeedMs != null ? rawSpeedMs * 3.6 : impliedSpeed * 3.6;
+        displaySpeedKmh = Math.max(0, speedKmh);
+
+        var effHeading = null;
+        if (displaySpeedKmh >= 3 && rawHeading != null && !isNaN(rawHeading)) {
+          effHeading = rawHeading;
+        } else if (displaySpeedKmh >= 3) {
+          effHeading = bearing(lastAcceptedFix.lat, lastAcceptedFix.lon, lat, lon);
+        }
+        if (effHeading != null) {
+          smoothedHeading = (smoothedHeading + shortestDelta(smoothedHeading, effHeading) * 0.6 + 360) % 360;
+        }
+      }
+    } else {
+      displaySpeedKmh = rawSpeedMs != null ? Math.max(0, rawSpeedMs * 3.6) : 0;
+    }
+
+    var targetLat = lat, targetLon = lon;
+    if (!restAnchor) {
+      restAnchor = [lat, lon];
+    } else {
+      var distFromAnchor = haversine(restAnchor[0], restAnchor[1], lat, lon);
+      var noiseRadius = Math.max(4, (acc || 10) * 0.7);
+      if (distFromAnchor < noiseRadius) {
+        targetLat = restAnchor[0];
+        targetLon = restAnchor[1];
+        displaySpeedKmh = 0;
+      } else {
+        restAnchor = [lat, lon];
+      }
+    }
+
+    animFrom = animatedPos.slice();
+    animTo = [targetLat, targetLon];
+    animStart = now;
+    var interval = lastAcceptedFix ? (now - lastAcceptedFix.tPerf) : 800;
+    animDur = Math.min(Math.max(interval, 300), 2000);
+
+    lastAcceptedFix = { lat: lat, lon: lon, tPerf: now, acc: acc };
+
+    setGpsStatus("ok", "GPS 연결됨");
+    hideGpsBanner();
+    updateHud();
+  }
+
+  function updateHud() {
+    document.getElementById("hudSpeed").innerHTML = Math.round(displaySpeedKmh) + '<span class="text-[10px] text-slate-400 font-normal ml-0.5">km/h</span>';
+    document.getElementById("hudHeading").innerHTML = Math.round(smoothedHeading) + '<span class="text-[10px] text-slate-400 font-normal ml-0.5">°</span>';
+    document.getElementById("hudAcc").innerHTML = "±" + (lastAccuracy != null ? Math.round(lastAccuracy) : "--") + '<span class="text-[10px] text-slate-400 font-normal ml-0.5">m</span>';
+  }
+
+  /* ============================================================
+     DEVICE ORIENTATION (compass fallback at low speed)
+  ============================================================ */
+  function handleOrientation(e) {
+    var h = null;
+    if (typeof e.webkitCompassHeading === "number") {
+      h = e.webkitCompassHeading;
+    } else if (e.alpha != null) {
+      h = 360 - e.alpha;
+    }
+    if (h == null || isNaN(h)) return;
+    compassAvailable = true;
+    compassHeading = (h + 360) % 360;
+    if (displaySpeedKmh < 3) {
+      smoothedHeading = (smoothedHeading + shortestDelta(smoothedHeading, compassHeading) * 0.25 + 360) % 360;
+      updateHud();
+    }
+  }
+
+  function initCompass() {
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      document.getElementById("compassPermBtn").classList.remove("hidden");
+      document.getElementById("compassPermBtn").addEventListener("click", function () {
+        DeviceOrientationEvent.requestPermission().then(function (state) {
+          if (state === "granted") {
+            window.addEventListener("deviceorientation", handleOrientation, true);
+            document.getElementById("compassPermBtn").classList.add("hidden");
+          }
+        }).catch(function () {});
+      });
+    } else {
+      window.addEventListener("deviceorientationabsolute", handleOrientation, true);
+      window.addEventListener("deviceorientation", handleOrientation, true);
+    }
+  }
+  initCompass();
+
+  /* ============================================================
+     ROTATION RIG (heading-up via CSS wrapper rotate — same trick as
+     the Leaflet version; Kakao's Map class has no native bearing either)
+  ============================================================ */
+  var wrapper = document.getElementById("mapWrapper");
+  var viewport = document.getElementById("mapViewport");
+  var compassRing = document.getElementById("compassRing");
+  var mapContainer = mapEl;
+
+  function currentWrapperAngle() { return mode === "nav" ? -smoothedHeading : 0; }
+
+  function applyRotation() {
+    var a = currentWrapperAngle();
+    wrapper.style.transform = "rotate(" + a + "deg)";
+    compassRing.style.transform = "rotate(" + (-a) + "deg)";
+    var rot = "rotate(" + smoothedHeading + " 34 34)";
+    var arrowEl = vehicleEl.querySelector(".arrow");
+    var fovEl = vehicleEl.querySelector(".fov");
+    if (arrowEl) arrowEl.setAttribute("transform", rot);
+    if (fovEl) fovEl.setAttribute("transform", rot);
+
+    var counter = -a;
+    pinOverlays.forEach(function (p) {
+      var wrap = p.el.querySelector(".pin-wrap");
+      if (wrap) wrap.style.transform = "rotate(" + counter + "deg)";
+    });
+  }
+
+  function setMode(next) {
+    mode = next;
+    document.getElementById("navModeBtn").classList.toggle("active", mode === "nav");
+    document.getElementById("northModeBtn").classList.toggle("active", mode === "north");
+    applyRotation();
+  }
+  document.getElementById("navModeBtn").addEventListener("click", function () { setMode("nav"); });
+  document.getElementById("northModeBtn").addEventListener("click", function () { setMode("north"); });
+  setMode("nav");
+
+  /* ============================================================
+     FOLLOW / RECENTER
+  ============================================================ */
+  var followBtn = document.getElementById("followBtn");
+  function setFollow(v) {
+    follow = v;
+    followBtn.classList.toggle("hidden-btn", follow);
+  }
+  followBtn.addEventListener("click", function () { setFollow(true); });
+  setFollow(true);
+
+  document.getElementById("zoomInBtn").addEventListener("click", function () { map.setLevel(map.getLevel() - 1, { animate: true }); });
+  document.getElementById("zoomOutBtn").addEventListener("click", function () { map.setLevel(map.getLevel() + 1, { animate: true }); });
+
+  /* ============================================================
+     COORDINATE HELPERS (rotation-aware; container-point math is
+     identical in spirit to the Leaflet version, using Kakao's own
+     projection instead of Leaflet's containerPointToLatLng)
+  ============================================================ */
+  function screenToContainerPoint(clientX, clientY) {
+    var vpRect = viewport.getBoundingClientRect();
+    var vcx = vpRect.left + vpRect.width / 2;
+    var vcy = vpRect.top + vpRect.height / 2;
+    var dxScreen = clientX - vcx;
+    var dyScreen = clientY - vcy;
+    var a = toRad(-currentWrapperAngle());
+    var dxMap = dxScreen * Math.cos(a) - dyScreen * Math.sin(a);
+    var dyMap = dxScreen * Math.sin(a) + dyScreen * Math.cos(a);
+    var w = mapContainer.clientWidth, h = mapContainer.clientHeight;
+    return new kakao.maps.Point(w / 2 + dxMap, h / 2 + dyMap);
+  }
+  function screenToLatLng(clientX, clientY) {
+    return map.getProjection().coordsFromContainerPoint(screenToContainerPoint(clientX, clientY));
+  }
+  function rotateScreenDeltaToMap(dx, dy) {
+    var a = toRad(-currentWrapperAngle());
+    return {
+      x: dx * Math.cos(a) - dy * Math.sin(a),
+      y: dx * Math.sin(a) + dy * Math.cos(a)
+    };
+  }
+
+  /* ============================================================
+     CUSTOM DRAG-PAN + PINCH-ZOOM (rotation-aware)
+     Kakao's own draggable/zoomable are disabled above for the same
+     reason as Leaflet's: their gesture math assumes an unrotated
+     container, which breaks once the wrapper is visually rotated in
+     heading-up mode. Panning mirrors the Leaflet version's panBy sign
+     convention (content follows the finger). Kakao's setLevel only
+     takes integer levels, so pinch here commits one level at a time
+     once the pinch distance crosses a ratio threshold, anchored via
+     Kakao's native {anchor} option — steppier than the OSM version's
+     continuous zoom, but always lands on the correct point.
+  ============================================================ */
+  var activePointers = new Map();
+  var singleDragLast = null;
+  var lastPinchDist = null;
+  var pinchBaseDist = null;
+  var gestureMoved = 0;
+
+  function onGesturePointerDown(e) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    mapContainer.setPointerCapture(e.pointerId);
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (activePointers.size === 1) {
+      gestureMoved = 0;
+      singleDragLast = { x: e.clientX, y: e.clientY };
+      startLongPress(e.clientX, e.clientY);
+    } else {
+      endLongPress();
+      lastPinchDist = null;
+      pinchBaseDist = null;
+    }
+  }
+
+  function onGesturePointerMove(e) {
+    if (!activePointers.has(e.pointerId)) return;
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    var pts = Array.from(activePointers.values());
+
+    if (pts.length === 1 && singleDragLast) {
+      var dx = e.clientX - singleDragLast.x;
+      var dy = e.clientY - singleDragLast.y;
+      gestureMoved += Math.abs(dx) + Math.abs(dy);
+      if (gestureMoved > 6) {
+        endLongPress();
+        var d = rotateScreenDeltaToMap(dx, dy);
+        map.panBy(-d.x, -d.y);
+        setFollow(false);
+        singleDragLast = { x: e.clientX, y: e.clientY };
+      }
+    } else if (pts.length === 2) {
+      endLongPress();
+      var dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      var mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+      if (pinchBaseDist == null) pinchBaseDist = dist;
+      var ratio = dist / pinchBaseDist;
+      if (ratio > 1.35 || ratio < 1 / 1.35) {
+        var anchor = screenToLatLng(mid.x, mid.y);
+        var nextLevel = map.getLevel() + (ratio > 1 ? -1 : 1);
+        map.setLevel(nextLevel, { anchor: anchor });
+        pinchBaseDist = dist;
+        setFollow(false);
+      }
+      lastPinchDist = dist;
+    }
+  }
+
+  function onGesturePointerUp(e) {
+    activePointers.delete(e.pointerId);
+    if (activePointers.size < 2) { lastPinchDist = null; pinchBaseDist = null; }
+    if (activePointers.size === 1) {
+      var remaining = Array.from(activePointers.values())[0];
+      singleDragLast = remaining;
+      gestureMoved = 0;
+    } else if (activePointers.size === 0) {
+      singleDragLast = null;
+      endLongPress();
+    }
+  }
+
+  // desktop convenience: wheel-to-zoom, anchored under the cursor
+  mapContainer.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    var anchor = screenToLatLng(e.clientX, e.clientY);
+    map.setLevel(map.getLevel() + (e.deltaY > 0 ? 1 : -1), { anchor: anchor });
+    setFollow(false);
+  }, { passive: false });
+
+  /* ============================================================
+     ANIMATION LOOP (LERP position + continuous rotation)
+  ============================================================ */
+  function tick() {
+    if (animFrom && animTo) {
+      var t = animDur > 0 ? Math.min(1, (performance.now() - animStart) / animDur) : 1;
+      animatedPos = [lerp(animFrom[0], animTo[0], t), lerp(animFrom[1], animTo[1], t)];
+      var ll = new kakao.maps.LatLng(animatedPos[0], animatedPos[1]);
+      vehicleOverlay.setPosition(ll);
+      accuracyCircle.setPosition(ll);
+      if (lastAccuracy != null) accuracyCircle.setRadius(lastAccuracy);
+      if (follow) map.setCenter(ll);
+      if (t >= 1) { animFrom = null; }
+    }
+    applyRotation();
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  /* ============================================================
+     PINS: shared via Firestore, live-synced to every viewer
+  ============================================================ */
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" }[c];
+    });
+  }
+
+  var pinLongPressTimer = null;
+  var pinLongPressStart = null;
+  function attachPinLongPress(el, pinId) {
+    function onDown(e) {
+      e.stopPropagation();
+      pinLongPressStart = { x: e.clientX, y: e.clientY };
+      clearTimeout(pinLongPressTimer);
+      pinLongPressTimer = setTimeout(function () {
+        pinLongPressStart = null;
+        openDeleteModal(pinId);
+      }, 600);
+    }
+    function onMove(e) {
+      if (!pinLongPressStart) return;
+      if (Math.abs(e.clientX - pinLongPressStart.x) > 10 || Math.abs(e.clientY - pinLongPressStart.y) > 10) {
+        clearTimeout(pinLongPressTimer);
+        pinLongPressStart = null;
+      }
+    }
+    function onUp(e) {
+      e.stopPropagation();
+      clearTimeout(pinLongPressTimer);
+      pinLongPressStart = null;
+    }
+    el.addEventListener("pointerdown", onDown);
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup", onUp);
+    el.addEventListener("pointercancel", onUp);
+    el.addEventListener("contextmenu", function (e) { e.preventDefault(); e.stopPropagation(); openDeleteModal(pinId); });
+  }
+
+  function renderPins() {
+    pinOverlays.forEach(function (p) { p.overlay.setMap(null); });
+    pinOverlays = [];
+    pins.forEach(function (p) {
+      var el = document.createElement("div");
+      el.className = "pin-box counter-invert";
+      el.innerHTML = '<div class="pin-anchor"><div class="pin-wrap"><div class="pin-label">' + escapeHtml(p.name) + '</div><div class="pin-dot"></div></div></div>';
+      var overlay = new kakao.maps.CustomOverlay({
+        position: new kakao.maps.LatLng(p.lat, p.lon),
+        content: el,
+        xAnchor: 0.5,
+        yAnchor: 1,
+        zIndex: 10
+      });
+      overlay.setMap(map);
+      attachPinLongPress(el, p.id);
+      pinOverlays.push({ overlay: overlay, el: el, id: p.id });
+    });
+  }
+
+  function startPinsSync() {
+    onSnapshot(pinsCol, function (snapshot) {
+      pins = snapshot.docs.map(function (d) {
+        var data = d.data();
+        return { id: d.id, name: data.name, lat: data.lat, lon: data.lon };
+      });
+      renderPins();
+    }, function () {
+      setGpsStatus("warn", "핀 동기화 실패");
+    });
+  }
+
+  var deleteModal = document.getElementById("deleteModal");
+  var deleteModalName = document.getElementById("deleteModalName");
+  var pendingDeleteId = null;
+  function openDeleteModal(id) {
+    var p = pins.find(function (x) { return x.id === id; });
+    if (!p) return;
+    pendingDeleteId = id;
+    deleteModalName.textContent = "'" + p.name + "' 핀을 삭제할까요?";
+    deleteModal.classList.remove("hidden");
+    deleteModal.classList.add("flex");
+  }
+  function closeDeleteModal() {
+    deleteModal.classList.add("hidden");
+    deleteModal.classList.remove("flex");
+    pendingDeleteId = null;
+  }
+  document.getElementById("deleteCancelBtn").addEventListener("click", closeDeleteModal);
+  document.getElementById("deleteConfirmBtn").addEventListener("click", function () {
+    if (pendingDeleteId) {
+      deleteDoc(doc(db, "pins", pendingDeleteId)).catch(function () {});
+    }
+    closeDeleteModal();
+  });
+
+  startPinsSync();
+
+  /* ============================================================
+     LONG-PRESS TO ADD PIN (rotation-aware coordinate mapping)
+  ============================================================ */
+  var pendingLatLng = null;
+  var pinModal = document.getElementById("pinModal");
+  var pinModalCoords = document.getElementById("pinModalCoords");
+  var pinNameInput = document.getElementById("pinNameInput");
+
+  function openPinModal(latlng) {
+    pendingLatLng = latlng;
+    pinModalCoords.textContent = latlng.getLat().toFixed(5) + ", " + latlng.getLng().toFixed(5);
+    pinNameInput.value = "";
+    pinModal.classList.remove("hidden");
+    pinModal.classList.add("flex");
+    setTimeout(function () { pinNameInput.focus(); }, 50);
+  }
+  function closePinModal() {
+    pinModal.classList.add("hidden");
+    pinModal.classList.remove("flex");
+    pendingLatLng = null;
+  }
+  document.getElementById("pinCancelBtn").addEventListener("click", closePinModal);
+  document.getElementById("pinSaveBtn").addEventListener("click", function () {
+    var name = pinNameInput.value.trim();
+    if (!name || !pendingLatLng) { closePinModal(); return; }
+    addDoc(pinsCol, { name: name, lat: pendingLatLng.getLat(), lon: pendingLatLng.getLng(), createdAt: serverTimestamp() }).catch(function () {});
+    closePinModal();
+  });
+
+  function startLongPress(x, y) {
+    longPressStart = { x: x, y: y };
+    clearTimeout(longPressTimer);
+    longPressTimer = setTimeout(function () {
+      longPressStart = null;
+      openPinModal(screenToLatLng(x, y));
+    }, 600);
+  }
+  function endLongPress() {
+    clearTimeout(longPressTimer);
+    longPressStart = null;
+  }
+
+  // desktop right-click fallback for adding a pin
+  mapContainer.addEventListener("contextmenu", function (e) {
+    e.preventDefault();
+    openPinModal(screenToLatLng(e.clientX, e.clientY));
+  });
+
+  mapContainer.addEventListener("pointerdown", onGesturePointerDown);
+  mapContainer.addEventListener("pointermove", onGesturePointerMove);
+  mapContainer.addEventListener("pointerup", onGesturePointerUp);
+  mapContainer.addEventListener("pointercancel", onGesturePointerUp);
+
+  /* ============================================================
+     WAKE LOCK
+  ============================================================ */
+  var wakeBtn = document.getElementById("wakeBtn");
+  async function enableWakeLock() {
+    if (!("wakeLock" in navigator)) { alert("이 브라우저는 화면 유지 기능을 지원하지 않습니다."); return; }
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeOn = true;
+      wakeBtn.classList.add("active");
+      wakeLock.addEventListener("release", function () {
+        if (wakeOn) wakeBtn.classList.remove("active");
+      });
+    } catch (e) { wakeOn = false; }
+  }
+  function disableWakeLock() {
+    wakeOn = false;
+    wakeBtn.classList.remove("active");
+    if (wakeLock) { wakeLock.release().catch(function () {}); wakeLock = null; }
+  }
+  wakeBtn.addEventListener("click", function () {
+    if (wakeOn) disableWakeLock(); else enableWakeLock();
+  });
+  document.addEventListener("visibilitychange", function () {
+    if (wakeOn && document.visibilityState === "visible" && !wakeLock) enableWakeLock();
+  });
+
+  /* ============================================================
+     DARK MAP TOGGLE
+  ============================================================ */
+  var darkBtn = document.getElementById("darkBtn");
+  darkBtn.addEventListener("click", function () {
+    isDark = !isDark;
+    mapEl.classList.toggle("dark-map", isDark);
+    darkBtn.classList.toggle("active", isDark);
+  });
+
+  /* ============================================================
+     RESIZE
+  ============================================================ */
+  window.addEventListener("resize", function () { map.relayout(); });
+  setTimeout(function () { map.relayout(); }, 200);
+
+});
+</script>
+</body>
+</html>
