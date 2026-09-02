@@ -583,17 +583,29 @@ if (typeof kakao === "undefined" || !kakao.maps) {
      DEVICE ORIENTATION (compass fallback at low speed)
   ============================================================ */
   // Raw device compass readings are noisy — handheld tremor and indoor magnetic
-  // interference make the raw heading flicker several degrees frame to frame,
-  // and since deviceorientation can fire dozens of times a second, even a modest
-  // blend factor ends up chasing that noise and visibly shaking the whole
-  // rotated map. Throttle how often we process events, ignore sub-threshold
-  // wobble outright, and blend the rest in gently.
-  var lastCompassProcessTime = 0;
-  function handleOrientation(e) {
-    var now = performance.now();
-    if (now - lastCompassProcessTime < 150) return;
-    lastCompassProcessTime = now;
+  // interference make the raw heading flicker several degrees sample to sample,
+  // and deviceorientation can fire dozens of times a second. Reacting to each
+  // raw sample (even throttled) chases that noise and visibly shakes the whole
+  // rotated map. Instead, every raw sample is collected into a short buffer,
+  // and roughly every 250ms that buffer's circular mean (headings wrap at
+  // 360°, so a plain average is wrong) is what actually gets blended in — an
+  // average over ~15 real samples is far steadier than reacting to any one of
+  // them, and a wider dead-band plus a gentler blend damp what noise remains.
+  var rawHeadingBuffer = [];
+  var lastCompassApplyTime = 0;
+  var COMPASS_APPLY_INTERVAL_MS = 250;
 
+  function circularMeanDeg(headingsDeg) {
+    var sx = 0, sy = 0;
+    for (var i = 0; i < headingsDeg.length; i++) {
+      var r = toRad(headingsDeg[i]);
+      sx += Math.cos(r);
+      sy += Math.sin(r);
+    }
+    return (toDeg(Math.atan2(sy, sx)) + 360) % 360;
+  }
+
+  function handleOrientation(e) {
     var h = null;
     if (typeof e.webkitCompassHeading === "number") {
       h = e.webkitCompassHeading;
@@ -602,11 +614,19 @@ if (typeof kakao === "undefined" || !kakao.maps) {
     }
     if (h == null || isNaN(h)) return;
     compassAvailable = true;
-    compassHeading = (h + 360) % 360;
+    rawHeadingBuffer.push((h + 360) % 360);
+    if (rawHeadingBuffer.length > 60) rawHeadingBuffer.shift(); // safety cap
+
+    var now = performance.now();
+    if (now - lastCompassApplyTime < COMPASS_APPLY_INTERVAL_MS) return;
+    lastCompassApplyTime = now;
+    compassHeading = circularMeanDeg(rawHeadingBuffer);
+    rawHeadingBuffer.length = 0;
+
     if (displaySpeedKmh < 3) {
       var delta = shortestDelta(smoothedHeading, compassHeading);
-      if (Math.abs(delta) < 2) return;
-      smoothedHeading = (smoothedHeading + delta * 0.08 + 360) % 360;
+      if (Math.abs(delta) < 3) return;
+      smoothedHeading = (smoothedHeading + delta * 0.06 + 360) % 360;
       updateHud();
     }
   }
