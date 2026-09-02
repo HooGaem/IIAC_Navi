@@ -667,7 +667,7 @@ async function sha256Hex(str) {
   function onGesturePointerDown(e) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     mapContainer.setPointerCapture(e.pointerId);
-    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now() });
     if (activePointers.size === 1) {
       gestureMoved = 0;
       hadPinch = false;
@@ -681,7 +681,7 @@ async function sha256Hex(str) {
 
   function onGesturePointerMove(e) {
     if (!activePointers.has(e.pointerId)) return;
-    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now() });
     var pts = Array.from(activePointers.values());
 
     if (pts.length === 1 && singleDragLast) {
@@ -736,6 +736,7 @@ async function sha256Hex(str) {
      ANIMATION LOOP (LERP position + continuous rotation)
   ============================================================ */
   function tick(now) {
+    releaseStalePointers();
     if (animFrom && animTo) {
       var t = animDur > 0 ? Math.min(1, (performance.now() - animStart) / animDur) : 1;
       animatedPos = [lerp(animFrom[0], animTo[0], t), lerp(animFrom[1], animTo[1], t)];
@@ -989,6 +990,27 @@ async function sha256Hex(str) {
   mapContainer.addEventListener("pointermove", onGesturePointerMove);
   mapContainer.addEventListener("pointerup", onGesturePointerUp);
   mapContainer.addEventListener("pointercancel", onGesturePointerUp);
+
+  // Some mobile browsers (Samsung Internet in particular has a known bug here)
+  // occasionally drop the pointerup/pointercancel event after a touch ends,
+  // especially with setPointerCapture in play — the pointer then sits in
+  // activePointers forever, and every subsequent pointermove for some other
+  // reason keeps re-applying its last delta, which reads as the map endlessly
+  // drifting in one direction even though nothing is touching the screen.
+  // lostpointercapture is the spec-correct event for "capture ended, for any
+  // reason" and catches most of these; the timestamp watchdog below is the
+  // fallback in case even that doesn't fire.
+  mapContainer.addEventListener("lostpointercapture", onGesturePointerUp);
+
+  var STALE_POINTER_MS = 700; // far longer than any real gap between touch events
+  function releaseStalePointers() {
+    var now = performance.now();
+    activePointers.forEach(function (p, id) {
+      if (now - p.t > STALE_POINTER_MS) {
+        onGesturePointerUp({ pointerId: id, clientX: p.x, clientY: p.y });
+      }
+    });
+  }
 
   /* ============================================================
      WAKE LOCK
