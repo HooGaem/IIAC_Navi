@@ -180,16 +180,26 @@
   </div>
 </div>
 
-<!-- ===== pin action modal (move / delete) ===== -->
+<!-- ===== pin action modal (rename / move / delete) ===== -->
 <div id="deleteModal" class="fixed inset-0 z-[900] hidden items-center justify-center bg-black/60 px-6">
   <div class="glass rounded-2xl p-4 w-full max-w-xs text-white">
     <div class="text-sm font-bold text-amber-300 mb-1">메모 핀</div>
     <div id="deleteModalName" class="text-[13px] text-slate-300 mb-3"></div>
-    <div class="flex flex-col gap-2">
+
+    <div id="pinActionButtons" class="flex flex-col gap-2">
+      <button id="renameStartBtn" class="w-full py-2 rounded-lg bg-amber-400/20 text-amber-300 text-sm font-bold border border-amber-400/40">이름 변경</button>
       <button id="moveStartBtn" class="w-full py-2 rounded-lg bg-cyan-500/20 text-cyan-300 text-sm font-bold border border-cyan-500/40">위치 이동</button>
       <div class="flex gap-2">
         <button id="deleteCancelBtn" class="flex-1 py-2 rounded-lg bg-white/10 text-slate-300 text-sm font-bold">취소</button>
         <button id="deleteConfirmBtn" class="flex-1 py-2 rounded-lg bg-red-500 text-white text-sm font-bold">삭제</button>
+      </div>
+    </div>
+
+    <div id="renameForm" class="hidden flex-col gap-2">
+      <input id="renameInput" type="text" class="w-full rounded-lg bg-white/10 border border-white/10 px-3 py-2 text-sm outline-none focus:border-amber-400" />
+      <div class="flex gap-2">
+        <button id="renameCancelBtn" class="flex-1 py-2 rounded-lg bg-white/10 text-slate-300 text-sm font-bold">취소</button>
+        <button id="renameSaveBtn" class="flex-1 py-2 rounded-lg bg-amber-400 text-[#1a1200] text-sm font-bold">저장</button>
       </div>
     </div>
   </div>
@@ -814,12 +824,22 @@ async function sha256Hex(str) {
 
   var deleteModal = document.getElementById("deleteModal");
   var deleteModalName = document.getElementById("deleteModalName");
+  var pinActionButtons = document.getElementById("pinActionButtons");
+  var renameForm = document.getElementById("renameForm");
+  var renameInput = document.getElementById("renameInput");
   var pendingDeleteId = null;
+  function showPinActionButtons() {
+    renameForm.classList.add("hidden");
+    renameForm.classList.remove("flex");
+    pinActionButtons.classList.remove("hidden");
+    pinActionButtons.classList.add("flex");
+  }
   function openDeleteModal(id) {
     var p = pins.find(function (x) { return x.id === id; });
     if (!p) return;
     pendingDeleteId = id;
     deleteModalName.textContent = "'" + p.name + "'";
+    showPinActionButtons();
     deleteModal.classList.remove("hidden");
     deleteModal.classList.add("flex");
   }
@@ -835,6 +855,25 @@ async function sha256Hex(str) {
     }
     closeDeleteModal();
   });
+
+  document.getElementById("renameStartBtn").addEventListener("click", function () {
+    var p = pins.find(function (x) { return x.id === pendingDeleteId; });
+    if (!p) return;
+    renameInput.value = p.name;
+    pinActionButtons.classList.add("hidden");
+    pinActionButtons.classList.remove("flex");
+    renameForm.classList.remove("hidden");
+    renameForm.classList.add("flex");
+    setTimeout(function () { renameInput.focus(); renameInput.select(); }, 50);
+  });
+  document.getElementById("renameCancelBtn").addEventListener("click", closeDeleteModal);
+  document.getElementById("renameSaveBtn").addEventListener("click", function () {
+    var name = renameInput.value.trim();
+    if (!name || !pendingDeleteId) { closeDeleteModal(); return; }
+    updateDoc(doc(db, "pins", pendingDeleteId), { name: name }).catch(function () {});
+    closeDeleteModal();
+  });
+  renameInput.addEventListener("keydown", function (e) { if (e.key === "Enter") document.getElementById("renameSaveBtn").click(); });
 
   // Move mode: pick a pin from the delete/move modal, then the next plain tap
   // on the map (not a drag, not a long-press) relocates it there.
