@@ -551,7 +551,18 @@ if (typeof kakao === "undefined" || !kakao.maps) {
   /* ============================================================
      DEVICE ORIENTATION (compass fallback at low speed)
   ============================================================ */
+  // Raw device compass readings are noisy — handheld tremor and indoor magnetic
+  // interference make the raw heading flicker several degrees frame to frame,
+  // and since deviceorientation can fire dozens of times a second, even a modest
+  // blend factor ends up chasing that noise and visibly shaking the whole
+  // rotated map. Throttle how often we process events, ignore sub-threshold
+  // wobble outright, and blend the rest in gently.
+  var lastCompassProcessTime = 0;
   function handleOrientation(e) {
+    var now = performance.now();
+    if (now - lastCompassProcessTime < 150) return;
+    lastCompassProcessTime = now;
+
     var h = null;
     if (typeof e.webkitCompassHeading === "number") {
       h = e.webkitCompassHeading;
@@ -562,7 +573,9 @@ if (typeof kakao === "undefined" || !kakao.maps) {
     compassAvailable = true;
     compassHeading = (h + 360) % 360;
     if (displaySpeedKmh < 3) {
-      smoothedHeading = (smoothedHeading + shortestDelta(smoothedHeading, compassHeading) * 0.25 + 360) % 360;
+      var delta = shortestDelta(smoothedHeading, compassHeading);
+      if (Math.abs(delta) < 2) return;
+      smoothedHeading = (smoothedHeading + delta * 0.08 + 360) % 360;
       updateHud();
     }
   }
@@ -634,8 +647,8 @@ if (typeof kakao === "undefined" || !kakao.maps) {
   followBtn.addEventListener("click", function () { setFollow(true); });
   setFollow(true);
 
-  document.getElementById("zoomInBtn").addEventListener("click", function () { map.setLevel(map.getLevel() - 1, { animate: true }); });
-  document.getElementById("zoomOutBtn").addEventListener("click", function () { map.setLevel(map.getLevel() + 1, { animate: true }); });
+  document.getElementById("zoomInBtn").addEventListener("click", function () { map.setLevel(map.getLevel() - 1); });
+  document.getElementById("zoomOutBtn").addEventListener("click", function () { map.setLevel(map.getLevel() + 1); });
 
   /* ============================================================
      COORDINATE HELPERS (rotation-aware; container-point math is
@@ -665,6 +678,25 @@ if (typeof kakao === "undefined" || !kakao.maps) {
     };
   }
 
+  // Pan/zoom built only on setCenter + getProjection, rather than panBy or
+  // setLevel's {anchor} option — both turned out not to behave as documented
+  // examples suggested (drag did nothing; zoom always pivoted on the map's
+  // center instead of the pinch point), so this sticks to the two primitives
+  // that are unambiguous: converting between container pixels and coordinates,
+  // and setting the center directly.
+  function panMapByPixels(dxMap, dyMap) {
+    var w = mapContainer.clientWidth, h = mapContainer.clientHeight;
+    var newCenterPt = new kakao.maps.Point(w / 2 - dxMap, h / 2 - dyMap);
+    map.setCenter(map.getProjection().coordsFromContainerPoint(newCenterPt));
+  }
+
+  function zoomAroundLatLng(anchorLatLng, newLevel) {
+    var beforePt = map.getProjection().containerPointFromCoords(anchorLatLng);
+    map.setLevel(newLevel);
+    var afterPt = map.getProjection().containerPointFromCoords(anchorLatLng);
+    panMapByPixels(beforePt.x - afterPt.x, beforePt.y - afterPt.y);
+  }
+
   /* ============================================================
      CUSTOM DRAG-PAN + PINCH-ZOOM (rotation-aware)
      Kakao's own draggable/zoomable are disabled above for the same
@@ -682,7 +714,7 @@ if (typeof kakao === "undefined" || !kakao.maps) {
   var lastPinchDist = null;
   var pinchBaseDist = null;
   var gestureMoved = 0;
-  var PINCH_COMMIT_RATIO = 1.3; // distance ratio that commits one integer level change
+  var PINCH_COMMIT_RATIO = 1.18; // distance ratio that commits one integer level change
 
   // Kakao's setLevel only takes whole levels, so a raw pinch would otherwise
   // feel "stepped." To make it feel continuous, every pointermove applies an
@@ -722,7 +754,7 @@ if (typeof kakao === "undefined" || !kakao.maps) {
       if (gestureMoved > 6) {
         endLongPress();
         var d = rotateScreenDeltaToMap(dx, dy);
-        map.panBy(-d.x, -d.y);
+        panMapByPixels(d.x, d.y);
         setFollow(false);
         singleDragLast = { x: e.clientX, y: e.clientY };
       }
@@ -741,7 +773,7 @@ if (typeof kakao === "undefined" || !kakao.maps) {
       if (ratio > PINCH_COMMIT_RATIO || ratio < 1 / PINCH_COMMIT_RATIO) {
         var anchor = screenToLatLng(mid.x, mid.y);
         var nextLevel = map.getLevel() + (ratio > 1 ? -1 : 1);
-        map.setLevel(nextLevel, { anchor: anchor });
+        zoomAroundLatLng(anchor, nextLevel);
         pinchBaseDist = dist;
         resetPinchVisualScale();
         setFollow(false);
@@ -773,7 +805,7 @@ if (typeof kakao === "undefined" || !kakao.maps) {
   mapContainer.addEventListener("wheel", function (e) {
     e.preventDefault();
     var anchor = screenToLatLng(e.clientX, e.clientY);
-    map.setLevel(map.getLevel() + (e.deltaY > 0 ? 1 : -1), { anchor: anchor });
+    zoomAroundLatLng(anchor, map.getLevel() + (e.deltaY > 0 ? 1 : -1));
     setFollow(false);
   }, { passive: false });
 
