@@ -142,11 +142,15 @@
     </div>
 
     <div id="hint" class="absolute top-2 left-2 right-14 z-[450] glass text-[11px] text-slate-300 rounded-lg px-2.5 py-1.5 pointer-events-none">
-      지도를 길게 눌러 메모 핀 추가 · 핀을 길게 눌러 삭제
+      지도를 길게 눌러 메모 핀 추가 · 핀을 길게 눌러 이동/삭제
     </div>
     <div id="gpsBanner" class="hidden absolute top-2 left-2 right-14 z-[460] glass rounded-lg px-3 py-2 flex items-center justify-between gap-2" style="border-color: rgba(255,107,107,0.5);">
       <span id="gpsBannerText" class="text-[11.5px] text-red-200 leading-snug"></span>
       <button id="gpsRetryBtn" class="shrink-0 px-2.5 py-1.5 rounded-md bg-red-500/30 text-white text-[11px] font-bold">다시 시도</button>
+    </div>
+    <div id="moveBanner" class="hidden absolute top-2 left-2 right-14 z-[460] glass rounded-lg px-3 py-2 flex items-center justify-between gap-2" style="border-color: rgba(255,197,61,0.5);">
+      <span id="moveBannerText" class="text-[11.5px] text-amber-200 leading-snug"></span>
+      <button id="moveCancelBtn" class="shrink-0 px-2.5 py-1.5 rounded-md bg-white/10 text-white text-[11px] font-bold">취소</button>
     </div>
     <div id="sdkErrorBanner" class="hidden absolute inset-x-3 top-1/2 -translate-y-1/2 z-[470] glass rounded-xl p-4 text-center" style="border-color: rgba(255,107,107,0.5);">
       <div class="text-sm font-bold text-red-300 mb-1.5">카카오맵을 불러오지 못했습니다</div>
@@ -179,14 +183,17 @@
   </div>
 </div>
 
-<!-- ===== delete-pin modal ===== -->
+<!-- ===== pin action modal (move / delete) ===== -->
 <div id="deleteModal" class="fixed inset-0 z-[900] hidden items-center justify-center bg-black/60 px-6">
   <div class="glass rounded-2xl p-4 w-full max-w-xs text-white">
-    <div class="text-sm font-bold text-red-400 mb-1">메모 핀 삭제</div>
+    <div class="text-sm font-bold text-amber-300 mb-1">메모 핀</div>
     <div id="deleteModalName" class="text-[13px] text-slate-300 mb-3"></div>
-    <div class="flex gap-2">
-      <button id="deleteCancelBtn" class="flex-1 py-2 rounded-lg bg-white/10 text-slate-300 text-sm font-bold">취소</button>
-      <button id="deleteConfirmBtn" class="flex-1 py-2 rounded-lg bg-red-500 text-white text-sm font-bold">삭제</button>
+    <div class="flex flex-col gap-2">
+      <button id="moveStartBtn" class="w-full py-2 rounded-lg bg-cyan-500/20 text-cyan-300 text-sm font-bold border border-cyan-500/40">위치 이동</button>
+      <div class="flex gap-2">
+        <button id="deleteCancelBtn" class="flex-1 py-2 rounded-lg bg-white/10 text-slate-300 text-sm font-bold">취소</button>
+        <button id="deleteConfirmBtn" class="flex-1 py-2 rounded-lg bg-red-500 text-white text-sm font-bold">삭제</button>
+      </div>
     </div>
   </div>
 </div>
@@ -205,7 +212,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {
-  getFirestore, collection, doc, getDoc, setDoc, addDoc, deleteDoc, onSnapshot, serverTimestamp
+  getFirestore, collection, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 // Same Firebase project as the OSM/Leaflet version, so both map engines share the
@@ -723,6 +730,7 @@ if (typeof kakao === "undefined" || !kakao.maps) {
   var lastPinchRatio = 1;
   var lastPinchMid = null;
   var gestureMoved = 0;
+  var hadPinch = false; // true once a gesture involved 2 fingers, so a fast 2→0 release isn't mistaken for a tap
 
   function resetPinchVisualScale() {
     mapEl.style.transition = "";
@@ -767,8 +775,9 @@ if (typeof kakao === "undefined" || !kakao.maps) {
     activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (activePointers.size === 1) {
       gestureMoved = 0;
+      hadPinch = false;
       singleDragLast = { x: e.clientX, y: e.clientY };
-      startLongPress(e.clientX, e.clientY);
+      if (!movingPinId) startLongPress(e.clientX, e.clientY);
     } else {
       endLongPress();
       pinchBaseDist = null;
@@ -793,6 +802,7 @@ if (typeof kakao === "undefined" || !kakao.maps) {
       }
     } else if (pts.length === 2) {
       endLongPress();
+      hadPinch = true;
       var dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
       var mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
       if (pinchBaseDist == null) {
@@ -821,6 +831,12 @@ if (typeof kakao === "undefined" || !kakao.maps) {
       singleDragLast = remaining;
       gestureMoved = 0;
     } else if (activePointers.size === 0) {
+      if (movingPinId && !hadPinch && gestureMoved <= 6) {
+        var idToMove = movingPinId;
+        var newLatLng = screenToLatLng(e.clientX, e.clientY);
+        cancelMovePin();
+        updateDoc(doc(db, "pins", idToMove), { lat: newLatLng.getLat(), lon: newLatLng.getLng() }).catch(function () {});
+      }
       singleDragLast = null;
       endLongPress();
     }
@@ -875,6 +891,7 @@ if (typeof kakao === "undefined" || !kakao.maps) {
   function attachPinLongPress(el, pinId) {
     function onDown(e) {
       e.stopPropagation();
+      if (movingPinId) return; // busy relocating another pin — ignore other pins for now
       pinLongPressStart = { x: e.clientX, y: e.clientY };
       clearTimeout(pinLongPressTimer);
       pinLongPressTimer = setTimeout(function () {
@@ -940,7 +957,7 @@ if (typeof kakao === "undefined" || !kakao.maps) {
     var p = pins.find(function (x) { return x.id === id; });
     if (!p) return;
     pendingDeleteId = id;
-    deleteModalName.textContent = "'" + p.name + "' 핀을 삭제할까요?";
+    deleteModalName.textContent = "'" + p.name + "'";
     deleteModal.classList.remove("hidden");
     deleteModal.classList.add("flex");
   }
@@ -956,6 +973,32 @@ if (typeof kakao === "undefined" || !kakao.maps) {
     }
     closeDeleteModal();
   });
+
+  // Move mode: pick a pin from the delete/move modal, then the next plain tap
+  // on the map (not a drag, not a long-press) relocates it there.
+  var movingPinId = null;
+  var moveBanner = document.getElementById("moveBanner");
+  var moveBannerText = document.getElementById("moveBannerText");
+
+  function startMovePin(id) {
+    var p = pins.find(function (x) { return x.id === id; });
+    if (!p) return;
+    movingPinId = id;
+    moveBannerText.textContent = "'" + p.name + "' 이동 — 새 위치를 지도에서 탭하세요.";
+    moveBanner.classList.remove("hidden");
+    hintEl.classList.add("hidden");
+  }
+  function cancelMovePin() {
+    movingPinId = null;
+    moveBanner.classList.add("hidden");
+    hintEl.classList.remove("hidden");
+  }
+  document.getElementById("moveStartBtn").addEventListener("click", function () {
+    var id = pendingDeleteId;
+    closeDeleteModal();
+    startMovePin(id);
+  });
+  document.getElementById("moveCancelBtn").addEventListener("click", cancelMovePin);
 
   startPinsSync();
 
