@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>IIAC 드라이브 내비게이터 (카카오맵)</title>
 
+<!-- PWA: lets this page be installed to the home screen as a standalone app -->
+<link rel="manifest" href="manifest-kakao.json">
+<meta name="theme-color" content="#0d1117">
+<link rel="apple-touch-icon" href="icons/icon-kakao-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="IIAC Navi K">
+
 <script src="//dapi.kakao.com/v2/maps/sdk.js?appkey=7ab262792dae44aa7df67bf94bc92440&autoload=false"></script>
 
 <script src="https://cdn.tailwindcss.com"></script>
@@ -243,6 +251,12 @@ var accessDocRef = doc(db, "meta", "access");
 async function sha256Hex(str) {
   var buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
   return Array.from(new Uint8Array(buf)).map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+}
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("sw.js").catch(function () {});
+  });
 }
 
 // Soft access gate: hides the app behind a shared password backed by a hash in

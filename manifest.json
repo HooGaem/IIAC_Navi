@@ -1,0 +1,15 @@
+{
+  "name": "IIAC 드라이브 내비게이터 (OSM)",
+  "short_name": "IIAC Navi",
+  "description": "인천공항 활주로 기동 점검용 실시간 GPS 내비게이터 — OpenStreetMap 기반",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "lang": "ko",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
