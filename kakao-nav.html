@@ -703,28 +703,62 @@ if (typeof kakao === "undefined" || !kakao.maps) {
      reason as Leaflet's: their gesture math assumes an unrotated
      container, which breaks once the wrapper is visually rotated in
      heading-up mode. Panning mirrors the Leaflet version's panBy sign
-     convention (content follows the finger). Kakao's setLevel only
-     takes integer levels, so pinch here commits one level at a time
-     once the pinch distance crosses a ratio threshold, anchored via
-     Kakao's native {anchor} option — steppier than the OSM version's
-     continuous zoom, but always lands on the correct point.
+     convention (content follows the finger).
+
+     Kakao's setLevel only takes whole levels, so there's no way to make
+     the map itself sit at an arbitrary in-between zoom. Instead, the
+     entire pinch gesture is tracked as a free, uncapped CSS scale on
+     #map (pivoting on the pinch midpoint) — you can stop your fingers
+     at literally any magnification and it stays there while you're
+     still touching the screen. Only on release do we settle: estimate
+     how many whole levels that scale corresponds to (web map tile
+     pyramids are conventionally 2x per level), commit that many levels
+     in one shot, and ease away whatever small mismatch is left between
+     the guessed 2x-per-level math and Kakao's actual scale — so the
+     settle is a quick correction rather than an abrupt snap.
   ============================================================ */
   var activePointers = new Map();
   var singleDragLast = null;
-  var lastPinchDist = null;
   var pinchBaseDist = null;
+  var lastPinchRatio = 1;
+  var lastPinchMid = null;
   var gestureMoved = 0;
-  var PINCH_COMMIT_RATIO = 1.18; // distance ratio that commits one integer level change
 
-  // Kakao's setLevel only takes whole levels, so a raw pinch would otherwise
-  // feel "stepped." To make it feel continuous, every pointermove applies an
-  // instant CSS scale directly to #map (pivoting on the pinch midpoint) for
-  // live visual feedback, and only once the cumulative pinch ratio crosses
-  // PINCH_COMMIT_RATIO do we actually call setLevel and reset the CSS scale
-  // back to 1 — at that instant the freshly rendered level is the right size,
-  // so the reset is invisible.
   function resetPinchVisualScale() {
+    mapEl.style.transition = "";
     mapEl.style.transform = "";
+  }
+
+  function settlePinchZoom() {
+    var ratio = lastPinchRatio;
+    var mid = lastPinchMid;
+    pinchBaseDist = null;
+    lastPinchRatio = 1;
+    lastPinchMid = null;
+
+    if (!mid || Math.abs(ratio - 1) < 0.04) { resetPinchVisualScale(); return; }
+
+    var levelsChanged = Math.round(Math.log2(ratio));
+    if (levelsChanged === 0) {
+      // didn't reach even one full level's worth of zoom — ease back to native size
+      mapEl.style.transition = "transform 0.15s ease-out";
+      mapEl.style.transform = "scale(1)";
+      setTimeout(resetPinchVisualScale, 180);
+      return;
+    }
+
+    var anchor = screenToLatLng(mid.x, mid.y);
+    zoomAroundLatLng(anchor, map.getLevel() - levelsChanged);
+    // the new level should already account for ~2^levelsChanged of the pinch;
+    // whatever's left over gets eased out instead of assumed to be exactly zero
+    var residual = ratio / Math.pow(2, levelsChanged);
+    mapEl.style.transition = "none";
+    mapEl.style.transform = "scale(" + residual + ")";
+    void mapEl.offsetWidth; // force reflow so the next line actually transitions
+    mapEl.style.transition = "transform 0.15s ease-out";
+    mapEl.style.transform = "scale(1)";
+    setTimeout(resetPinchVisualScale, 180);
+    setFollow(false);
   }
 
   function onGesturePointerDown(e) {
@@ -737,7 +771,6 @@ if (typeof kakao === "undefined" || !kakao.maps) {
       startLongPress(e.clientX, e.clientY);
     } else {
       endLongPress();
-      lastPinchDist = null;
       pinchBaseDist = null;
     }
   }
@@ -765,31 +798,23 @@ if (typeof kakao === "undefined" || !kakao.maps) {
       if (pinchBaseDist == null) {
         pinchBaseDist = dist;
         var originCp = screenToContainerPoint(mid.x, mid.y);
+        mapEl.style.transition = "";
         mapEl.style.transformOrigin =
           (originCp.x / mapContainer.clientWidth * 100) + "% " +
           (originCp.y / mapContainer.clientHeight * 100) + "%";
       }
       var ratio = dist / pinchBaseDist;
-      if (ratio > PINCH_COMMIT_RATIO || ratio < 1 / PINCH_COMMIT_RATIO) {
-        var anchor = screenToLatLng(mid.x, mid.y);
-        var nextLevel = map.getLevel() + (ratio > 1 ? -1 : 1);
-        zoomAroundLatLng(anchor, nextLevel);
-        pinchBaseDist = dist;
-        resetPinchVisualScale();
-        setFollow(false);
-      } else {
-        mapEl.style.transform = "scale(" + ratio + ")";
-      }
-      lastPinchDist = dist;
+      ratio = Math.max(0.2, Math.min(6, ratio));
+      mapEl.style.transform = "scale(" + ratio + ")";
+      lastPinchRatio = ratio;
+      lastPinchMid = mid;
     }
   }
 
   function onGesturePointerUp(e) {
     activePointers.delete(e.pointerId);
-    if (activePointers.size < 2) {
-      lastPinchDist = null;
-      pinchBaseDist = null;
-      resetPinchVisualScale();
+    if (activePointers.size < 2 && pinchBaseDist != null) {
+      settlePinchZoom();
     }
     if (activePointers.size === 1) {
       var remaining = Array.from(activePointers.values())[0];
@@ -820,8 +845,16 @@ if (typeof kakao === "undefined" || !kakao.maps) {
       vehicleOverlay.setPosition(ll);
       accuracyCircle.setPosition(ll);
       if (lastAccuracy != null) accuracyCircle.setRadius(lastAccuracy);
-      if (follow) map.setCenter(ll);
       if (t >= 1) { animFrom = null; }
+    }
+    // Recentering used to live inside the block above, so it only ever ran
+    // while a GPS fix's LERP animation was actively in flight — tapping
+    // "내 위치로" while stationary (no animation running) silently did
+    // nothing until the next fix arrived. Keeping it here, unconditional on
+    // animation state, means it recenters on animatedPos every frame follow
+    // is on, GPS animating or not.
+    if (follow) {
+      map.setCenter(new kakao.maps.LatLng(animatedPos[0], animatedPos[1]));
     }
     applyRotation();
     requestAnimationFrame(tick);

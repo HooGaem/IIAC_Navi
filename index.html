@@ -716,9 +716,14 @@ async function sha256Hex(str) {
       vehicleMarker.setLatLng(animatedPos);
       accuracyCircle.setLatLng(animatedPos);
       if (lastAccuracy != null) accuracyCircle.setRadius(lastAccuracy);
-      if (follow) map.setView(animatedPos, map.getZoom(), { animate: false });
       if (t >= 1) { animFrom = null; }
     }
+    // Recentering used to live inside the block above, so it only ever ran
+    // while a GPS fix's LERP animation was actively in flight — tapping
+    // "내 위치로" while stationary (no animation running) silently did
+    // nothing until the next fix arrived. Keeping it here, unconditional on
+    // animation state, means it recenters every frame follow is on.
+    if (follow) map.setView(animatedPos, map.getZoom(), { animate: false });
     applyRotation();
     requestAnimationFrame(tick);
   }
